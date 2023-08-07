@@ -1,156 +1,263 @@
 #!/bin/bash
+## to be updated to match your settings
+PROJECT_HOME="."
+credentials_file="$PROJECT_HOME/data/credentials.txt"
+logged_in_file="$PROJECT_HOME/.logged_in"
 
-credentials_file="credentials.txt"
-logged_in_file=".logged_in"
 
-# Function to check if a username exists in the credentials file
-username_exists() {
-    local username="$1"
-    grep -q "^$username:" "$credentials_file"
+setup() {
+    if [ -s "$PROJECT_HOME/.logged_in" ]; then
+        logged_in_user=$(cat "$PROJECT_HOME/.logged_in")
+        signed_in=true
+    else
+        signed_in=false
+    fi
 }
 
-# Function to generate a random salt
+get_credentials() {
+    read -p 'Username: ' user
+    read -rs -p 'Password: ' pass
+    echo
+}
+
 generate_salt() {
     openssl rand -hex 8
-}
-
-# Function to generate salted hash
-generate_hash() {
-    local data="$1"
-    local salt="$2"
-    echo -n "$data$salt" | openssl dgst -sha256 | awk '{print $2}'
-}
-
-# Function to check if a role is valid
-is_valid_role() {
-    local role="$1"
-    case "$role" in
-        normal|salesperson|admin)
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-# Function to add new credentials to the file
-add_credentials() {
-    local username="$1"
-    local password="$2"
-    local role="${3:-normal}"  # Use "normal" as the default value if the third argument is not provided
-
-    # Check if the role is valid
-    if ! is_valid_role "$role"; then
-        echo "Invalid role. Role should be either normal, salesperson, or admin."
-        return 1
-    fi
-
-    # Check if the username already exists
-    if username_exists "$username"; then
-        echo "Username '$username' already exists. Credentials not added."
-        return 1
-    fi
-
-    # Generate salt and hash the password with the salt
-    local salt=$(generate_salt)
-    local hashed_password=$(generate_hash "$password" "$salt")
-
-    # Append the line in the specified format to the credentials file
-    echo "$username:$hashed_password:$salt:$role:0" >> "$credentials_file"
-    echo "New credentials added to $credentials_file"
     return 0
 }
 
-# Function to verify credentials and update the login status
-verify_credentials() {
-    local username="$1"
-    local password="$2"
+hash_password() {
+    password=$1
+    salt=$2
+    echo -n "${password}${salt}" | sha256sum | awk '{print $1}'
+    return 0
+}
 
-    # Check if the username exists in the credentials file and get stored hash and salt
-    local stored_hash_and_salt
-    stored_hash_and_salt=$(get_stored_hash_and_salt "$username")
+check_existing_username(){
+    username=$1
+    if grep -q "^$username:" "$credentials_file"; then
+        return 0
+    fi
+    return 1
+}
 
-    if [ -z "$stored_hash_and_salt" ]; then
-        echo "Invalid username"
+register_credentials() {
+    username=$1
+    password=$2
+    fullname=$3
+    role=${4:-"normal"}
+
+    if check_existing_username $username; then
+        echo "Error: The username already exists"
         return 1
     fi
+    if [ "$role" != "normal" ] && [ "$role" != "salesperson" ] && [ "$role" != "admin" ]; then
+        echo
+        echo "Error: Invalid role.][] Role should be normal, salesperson, or admin."
+        return 1
+    fi
+    salt=`generate_salt`
+    hashed_pwd=`hash_password $password $salt`
+    echo "$username:$hashed_pwd:$salt:$fullname:$role:0" >> "$credentials_file"
+    echo "Registration successful!"
+}
 
-    # Extract stored hash and salt
-    local stored_hash
-    local stored_salt
-    IFS=':' read -r stored_hash stored_salt <<< "$stored_hash_and_salt"
-
-    # Compute hash based on the provided password and stored salt
-    local input_hash=$(echo -n "$password$stored_salt" | openssl dgst -sha256 | awk '{print $2}')
-
-    # Compare the generated hash with the stored hash
-    if [ "$input_hash" = "$stored_hash" ]; then
-        echo "Authentication successful! Welcome, $username."
-
-        # Update credentials file with the new login status
-        sed -i "s/^$username:.*$/$username:$stored_hash:$stored_salt/" "$credentials_file"
-
-        # Create .logged_in file with the username of the logged-in user
-        echo "$username" > "$logged_in_file"
-
-        return 0
+verify_credentials() {
+    username=$1
+    password=$2
+    stored_line=$(grep "^$username:" "$credentials_file")
+    if [ -z "$stored_line" ]; then
+        echo "Invalid username."
+        return 1
+    fi
+    stored_hash=$(echo "$stored_line" | cut -d ":" -f 2)
+    stored_salt=$(echo "$stored_line" | cut -d ":" -f 3)
+    computed_hash=$(hash_password "$password" "$stored_salt")
+    if [ "$computed_hash" == "$stored_hash" ]; then
+        sed -i "/^$username:/s/.$/1/" "$credentials_file"
+        signed_in=true
+        filename=".logged_in"
+        if [ ! -f $filename ]
+        then
+            touch $filename
+        fi
+        echo $username> $filename
+        echo
+        echo "Login successful. Welcome, $username!"
     else
-        echo "Invalid password. Authentication failed."
+        echo "Invalid password."
         return 1
     fi
 }
 
-# Function to logout
 logout() {
     if [ -s "$logged_in_file" ]; then
-        # Read the username of the currently logged-in user
-        local logged_in_user
-        logged_in_user=$(<"$logged_in_file")
-
-        # Delete the .logged_in file
-        rm "$logged_in_file"
-
-        # Update the credentials file to change the last field to 0
-        sed -i "s/^$logged_in_user:.*$/\0:0/" "$credentials_file"
-
-        echo "Logout successful. Goodbye, $logged_in_user."
+        logged_in_user=$(cat "$logged_in_file")
+        > "$logged_in_file"
+        sed -i "/^$logged_in_user:/s/.$/0/" "$credentials_file"
+        signed_in=false
+        echo "Logout successful. Goodbye, $logged_in_user!"
     else
         echo "No user is currently logged in."
     fi
 }
 
-# Function to display the main menu
-main_menu() {
-    PS3="Select an option: "
-    options=("Login" "Self-Register" "Exit")
+delete_account(){
+    username=$(cat "$logged_in_file")
+    if [[ "$username" == "admin" ]]
+    then
+        echo
+        echo "Can not delete superadmin"
+    else
+        password=$1
+        stored_line=$(grep "^$username:" "$credentials_file")
+        if [ -z "$stored_line" ]; then
+            echo "Invalid username."
+            return 1
+        fi
+        stored_hash=$(echo "$stored_line" | cut -d ":" -f 2)
+        stored_salt=$(echo "$stored_line" | cut -d ":" -f 3)
+        computed_hash=$(hash_password "$password" "$stored_salt")
+        if [ "$computed_hash" == "$stored_hash" ]; then
+            logged_in_user=$(cat "$logged_in_file")
+            > "$logged_in_file"
+            sed -i "/^$logged_in_user/d" "$credentials_file"
+            signed_in=false
+            echo "Account deleted"
+        else
+            echo "Invalid password."
+            return 1
+        fi
+    fi
+    
 
-    select opt in "${options[@]}"; do
-        case $REPLY in
-            1)  # Login
-                read -p "Username: " input_username
-                read -s -p "Password: " input_password
-                echo
-                verify_credentials "$input_username" "$input_password"
-                ;;
-            2)  # Self-Register
-                read -p "Username: " new_username
-                read -s -p "Password: " new_password
-                echo
-                read -p "Fullname: " new_fullname
-                read -p "Role (normal/salesperson/admin): " new_role
-                add_credentials "$new_username" "$new_password" "$new_fullname" "$new_role"
-                ;;
-            3)  # Exit
-                echo "Exiting the application."
-                exit 0
-                ;;
-            *)
-                echo "Invalid option. Please try again."
-                ;;
-        esac
+}
+
+register_credentials_admin() {
+    username=$1
+    password=$2
+    fullname=$3
+    role=$4
+
+    if check_existing_username $username; then
+        echo "Error: The username already exists"
+        return 1
+    fi
+    if [ "$role" != "normal" ] && [ "$role" != "salesperson" ] && [ "$role" != "admin" ]; then
+        echo
+        echo "Error: Invalid role. Role should be normal, salesperson, or admin."
+        return 1
+    fi
+    salt=`generate_salt`
+    hashed_pwd=`hash_password $password $salt`
+    echo "$username:$hashed_pwd:$salt:$fullname:$role:0" >> "$credentials_file"
+    echo "Registration successful!"
+}
+
+start_program(){
+    setup
+    while true; do
+        if [ "$signed_in" = true ]
+        then
+            username=$(cat "$logged_in_file")
+            stored_line=$(grep "^$username:" "$credentials_file")
+            IFS=: 
+            read -ra arr <<< "$stored_line" 
+            role="${arr[4]}"
+            if [ "$role" = "admin" ]
+            then
+                echo "Admin panel"
+                echo "1. Add user"
+                echo "2. Logout"
+                echo "3. Exit"
+                echo "4. Delete Account"
+            else
+                echo "User panel"
+                echo "1. Switch account"
+                echo "2. Register"
+                echo "3. Exit"
+                echo "4. Delete Account"
+                echo "5. Logout"
+            fi
+        else
+            echo "1. Login"
+            echo "2. Register"
+            echo "3. Exit"
+        fi
+        read -p "Enter your choice: " choice
+        
+        if [ "$role" = "admin" ]
+        then
+            case $choice in
+                1)
+                    read -p 'Username: ' user
+                    read -rs -p 'Password: ' pass
+                    echo
+                    read -p 'Full name: ' name
+                    read -p 'Role: ' role
+                    echo
+                    register_credentials_admin "$user" "$pass" "$name" "$role"
+                    ;;
+                2)
+                    if [ "$signed_in" = true ]
+                    then
+                        logout
+                    else
+                        echo "Invalid choice. Please input a valid choice"
+                    fi
+                    ;; 
+                3)
+                    exit
+                    ;; 
+                4)
+                    read -rs -p "Enter password: " password
+                    delete_account $password
+                    ;;
+                *)
+                    echo "Invalid choice. Please input a valid choice"
+                    ;;
+            esac
+
+        else
+            case $choice in
+                1)
+                    get_credentials
+                    verify_credentials "$user" "$pass"
+                    ;;
+                2)
+                    read -p "Enter username: " username
+                    read -rs -p "Enter password: " password
+                    echo
+                    read -p "Enter your full name: " fullname
+                    register_credentials $username $password $fullname
+                    ;;
+                3)
+                    exit
+                    ;; 
+                4)
+                    if [ "$signed_in" = true ]
+                    then
+                        read -rs -p "Enter password: " password
+                        delete_account $password
+                    else
+                        echo "Invalid choice. Please input a valid choice"
+                    fi
+                    ;;
+                5)
+                    if [ "$signed_in" = true ]
+                    then
+                    logout
+                    else
+                        echo "Invalid choice. Please input a valid choice"
+                    fi
+                    ;; 
+                *)
+                    echo "Invalid choice. Please input a valid choice"
+                    ;;
+            esac
+        fi
+        
     done
 }
 
-# Start the main menu
-main_menu
+echo "Welcome to the authentication system."
+start_program
